@@ -2,16 +2,11 @@ package com.example.hideandseek.ui.view
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.location.Location
-import android.os.Build
 import android.os.Bundle
 import android.os.Looper
-import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.navigation.findNavController
@@ -19,21 +14,15 @@ import androidx.navigation.ui.AppBarConfiguration
 import androidx.navigation.ui.setupActionBarWithNavController
 import androidx.navigation.ui.setupWithNavController
 import com.example.hideandseek.R
-import com.example.hideandseek.data.datasource.local.User
-import com.example.hideandseek.data.datasource.local.UserRoomDatabase
 import com.example.hideandseek.databinding.ActivityMainBinding
 import com.example.hideandseek.ui.viewmodel.MainActivityViewModel
 import com.google.android.gms.location.*
 import com.google.android.gms.tasks.Task
 import com.google.android.material.bottomnavigation.BottomNavigationView
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.launch
-import java.net.URL
+import dagger.hilt.android.AndroidEntryPoint
 import java.time.LocalTime
 
-
+@AndroidEntryPoint
 class MainActivity : AppCompatActivity() {
 
     // 直近の現在地情報を取得するためのクライアント
@@ -44,8 +33,6 @@ class MainActivity : AppCompatActivity() {
 
     // 現在地を更新するためのコールバック
     private lateinit var locationCallback: LocationCallback
-
-    private lateinit var relativeTime: LocalTime
 
     private val viewModel: MainActivityViewModel by viewModels()
 
@@ -62,8 +49,11 @@ class MainActivity : AppCompatActivity() {
         val navController = findNavController(R.id.nav_host_fragment_activity_main)
         val appBarConfiguration = AppBarConfiguration(
             setOf(
-                R.id.navigation_main
-            )
+                R.id.navigation_main,
+                R.id.navigation_be_trapped,
+                R.id.navigation_result,
+                R.id.navigation_watch,
+            ),
         )
 
         supportActionBar?.hide()
@@ -76,7 +66,7 @@ class MainActivity : AppCompatActivity() {
         // 正確な位置情報、おおよその位置情報どちらを許可しますか？というダイアログが出る。
         // どちらか選んで許可すれば、選ばれたもの、許可されなければ権限はなし
         val locationPermissionRequest = registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
+            ActivityResultContracts.RequestMultiplePermissions(),
         ) { permissions ->
             when {
                 permissions.getOrDefault(Manifest.permission.ACCESS_FINE_LOCATION, false) -> {
@@ -91,39 +81,30 @@ class MainActivity : AppCompatActivity() {
         }
 
         // リクエストを送る
-        locationPermissionRequest.launch(arrayOf(
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ))
+        locationPermissionRequest.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+            ),
+        )
 
         // 位置情報を取得する
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
-        // permission check
-        if (ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
+        // 位置情報の権限があるか確認する
+        checkLocationPermission()
 
         // 直近の位置情報を取得
         fusedLocationClient.lastLocation
-            .addOnSuccessListener { location : Location? ->
+            .addOnSuccessListener { location: Location? ->
                 // Got last known location. In some rare situations this can be null
                 if (location != null) {
-                    relativeTime = LocalTime.now()
-                    viewModel.deleteAll(applicationContext)
-                    //ずれと相対時間を計算
-                    val gap = viewModel.calculateGap(location)
-                    relativeTime = relativeTime.minusNanos(gap)
-                    val user = User(0, relativeTime.toString().substring(0, 8), location.longitude, location.latitude)
-                    viewModel.insert(user, applicationContext)
-                    Log.d("LocationTest", location.speed.toString())
+                    // 相対時間の初期化
+                    viewModel.setUpRelativeTime(LocalTime.now())
+                    // User情報の初期化はアプリの起動時にのみ行う
+                    viewModel.deleteAllUser()
+                    viewModel.deleteAllTrap()
+                    postCalculatedRelativeTime(location)
                 }
             }
 
@@ -144,12 +125,7 @@ class MainActivity : AppCompatActivity() {
             override fun onLocationResult(locationResult: LocationResult) {
                 super.onLocationResult(locationResult)
                 for (location in locationResult.locations) {
-                    // ずれと相対時間を計算
-                    val gap = viewModel.calculateGap(location)
-                    relativeTime = relativeTime.minusNanos(gap).plusSeconds(1)
-                    val user = User(0, relativeTime.toString().substring(0, 8), location.longitude, location.latitude)
-                    viewModel.insert(user, applicationContext)
-                    Log.d("LocationCallback", "rel: $relativeTime, loc${LocalTime.now()}")
+                    postCalculatedRelativeTime(location)
                 }
             }
         }
@@ -166,23 +142,46 @@ class MainActivity : AppCompatActivity() {
         startLocationUpdates()
     }
 
-    // 位置情報の更新をする関数
-    private fun startLocationUpdates() {
-        // permission check
+    // 相対時間を計算し、Roomにinsertする関数
+    private fun postCalculatedRelativeTime(location: Location) {
+        // ずれとを計算
+        val gap = viewModel.calculateGap(location)
+        // 相対時間を計算
+        viewModel.calculateRelativeTime(gap)
+        // Roomに相対時間と座標を送る
+        viewModel.insertUser(viewModel.relativeTime, location)
+        // 10秒おきにAPI通信をする
+        if (viewModel.relativeTime.second % 10 == 0) {
+            viewModel.deleteAllLocation()
+            viewModel.postSpacetime(viewModel.relativeTime, location)
+            viewModel.getSpacetime(viewModel.relativeTime)
+        }
+    }
+
+    // 位置情報の権限があるかどうかを確認する関数
+    private fun checkLocationPermission() {
         if (ActivityCompat.checkSelfPermission(
                 this,
-                Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.ACCESS_FINE_LOCATION,
             ) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
                 this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
+                Manifest.permission.ACCESS_COARSE_LOCATION,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             return
         }
-        fusedLocationClient.requestLocationUpdates(locationRequest,
-        locationCallback,
-            Looper.getMainLooper()
-            )
+    }
+
+    // 位置情報の更新をする関数
+    private fun startLocationUpdates() {
+        // 位置情報の権限があるか確認する
+        checkLocationPermission()
+        // 位置情報の更新
+        fusedLocationClient.requestLocationUpdates(
+            locationRequest,
+            locationCallback,
+            Looper.getMainLooper(),
+        )
     }
 
     // 位置情報の更新を止める関数

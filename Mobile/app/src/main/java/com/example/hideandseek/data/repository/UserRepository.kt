@@ -1,26 +1,43 @@
 package com.example.hideandseek.data.repository
 
-import android.content.Context
-import com.example.hideandseek.data.datasource.local.User
+import androidx.annotation.WorkerThread
 import com.example.hideandseek.data.datasource.local.UserDao
-import com.example.hideandseek.data.datasource.local.UserRoomDatabase
+import com.example.hideandseek.data.datasource.local.UserData
 import kotlinx.coroutines.flow.Flow
+import javax.inject.Inject
 
-class UserRepository (private val context: Context) {
+interface UserRepository {
+    val allUsers: Flow<List<UserData>>
 
-    private val userDao: UserDao by lazy { UserRoomDatabase.getInstance(context).userDao() }
+    suspend fun getLatest(): UserData
 
-    val allUsers: Flow<List<User>> = userDao.getAll()
+    suspend fun insert(user: UserData)
 
-    suspend fun insert(user: User) {
+    suspend fun deleteAll()
+}
+
+class UserRepositoryImpl @Inject constructor(
+    private val userDao: UserDao,
+) : UserRepository {
+
+    override val allUsers: Flow<List<UserData>>
+        get() = userDao.getAll()
+
+    @Suppress("RedundantSuspendModifier")
+    @WorkerThread
+    override suspend fun getLatest(): UserData {
+        return userDao.getLatest()
+    }
+
+    @Suppress("RedundantSuspendModifier")
+    @WorkerThread
+    override suspend fun insert(user: UserData) {
         userDao.insert(user)
     }
 
-    suspend fun deleteAll() {
+    @Suppress("RedundantSuspendModifier")
+    @WorkerThread
+    override suspend fun deleteAll() {
         userDao.deleteAll()
-    }
-
-    fun getLocation(relativeTime: String): Flow<List<User>> {
-        return userDao.getLocation(relativeTime)
     }
 }
